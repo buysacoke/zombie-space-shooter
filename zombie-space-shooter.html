@@ -51,6 +51,153 @@ window.addEventListener('keydown', e => {
 });
 window.addEventListener('keyup', e => { keys[e.code] = false; });
 
+// ── Audio ─────────────────────────────────────────────────────────────────────
+let audioCtx     = null;
+let musicNodes   = null;   // holds running music oscillator refs
+let currentMusic = 'none'; // 'none' | 'normal' | 'boss'
+let activeGroans = 0;      // cap concurrent zombie groan sounds
+
+function ensureAudio() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+}
+
+function playLaser() {
+  if (!audioCtx) return;
+  const t   = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  const g   = audioCtx.createGain();
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(880, t);
+  osc.frequency.exponentialRampToValueAtTime(110, t + 0.1);
+  g.gain.setValueAtTime(0.18, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+  osc.connect(g);
+  g.connect(audioCtx.destination);
+  osc.start(t);
+  osc.stop(t + 0.14);
+}
+
+function playGroan(isBoss) {
+  if (!audioCtx) return;
+  if (!isBoss && activeGroans >= 3) return;
+  activeGroans++;
+
+  const t        = audioCtx.currentTime;
+  const baseFreq = isBoss ? 52 : 85 + Math.random() * 45;
+  const vol      = isBoss ? 0.13 : 0.055;
+  const dur      = isBoss ? 0.65 : 0.42;
+
+  const osc    = audioCtx.createOscillator();
+  const shaper = audioCtx.createWaveShaper();
+  const g      = audioCtx.createGain();
+
+  // Soft distortion curve
+  const n = 256, curve = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = (i * 2) / n - 1;
+    curve[i] = (Math.PI + 150) * x / (Math.PI + 150 * Math.abs(x));
+  }
+  shaper.curve = curve;
+
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(baseFreq, t);
+  osc.frequency.linearRampToValueAtTime(baseFreq * 0.65, t + dur);
+
+  g.gain.setValueAtTime(0.001, t);
+  g.gain.linearRampToValueAtTime(vol, t + 0.06);
+  g.gain.setValueAtTime(vol, t + dur * 0.55);
+  g.gain.linearRampToValueAtTime(0.001, t + dur);
+
+  osc.connect(shaper);
+  shaper.connect(g);
+  g.connect(audioCtx.destination);
+  osc.start(t);
+  osc.stop(t + dur + 0.05);
+  osc.onended = () => { activeGroans = Math.max(0, activeGroans - 1); };
+}
+
+function stopMusic() {
+  if (!musicNodes || !audioCtx) return;
+  const t = audioCtx.currentTime;
+  musicNodes.masterGain.gain.setValueAtTime(musicNodes.masterGain.gain.value, t);
+  musicNodes.masterGain.gain.linearRampToValueAtTime(0, t + 0.6);
+  const nodes = musicNodes.oscillators;
+  setTimeout(() => {
+    nodes.forEach(n => { try { n.stop(); n.disconnect(); } catch(e) {} });
+  }, 700);
+  musicNodes   = null;
+  currentMusic = 'none';
+}
+
+function startMusic(type) {
+  if (currentMusic === type) return;
+  stopMusic();
+  if (!audioCtx) return;
+  currentMusic = type;
+
+  const masterGain = audioCtx.createGain();
+  masterGain.connect(audioCtx.destination);
+  const oscillators = [];
+
+  if (type === 'normal') {
+    // Ambient space: three sine layers + slow tremolo LFO
+    masterGain.gain.setValueAtTime(0, audioCtx.currentTime);
+    masterGain.gain.linearRampToValueAtTime(0.045, audioCtx.currentTime + 1.0);
+
+    const freqs = [110, 165, 220];
+    freqs.forEach(f => {
+      const osc = audioCtx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = f;
+      osc.connect(masterGain);
+      osc.start();
+      oscillators.push(osc);
+    });
+
+    // Slow tremolo LFO at 0.25 Hz
+    const lfo = audioCtx.createOscillator();
+    const lfoGain = audioCtx.createGain();
+    lfo.frequency.value = 0.25;
+    lfoGain.gain.value  = 0.018;
+    lfo.connect(lfoGain);
+    lfoGain.connect(masterGain.gain);
+    lfo.start();
+    oscillators.push(lfo);
+
+  } else if (type === 'boss') {
+    // Ominous: low sawtooth drone + minor-third + rhythmic pulse LFO
+    masterGain.gain.setValueAtTime(0, audioCtx.currentTime);
+    masterGain.gain.linearRampToValueAtTime(0.055, audioCtx.currentTime + 0.8);
+
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 400;
+    filter.connect(masterGain);
+
+    [[55, 'sawtooth'], [82.5, 'square']].forEach(([f, t]) => {
+      const osc = audioCtx.createOscillator();
+      osc.type = t;
+      osc.frequency.value = f;
+      osc.connect(filter);
+      osc.start();
+      oscillators.push(osc);
+    });
+
+    // Rhythmic pulse LFO at 1.8 Hz
+    const lfo = audioCtx.createOscillator();
+    const lfoGain = audioCtx.createGain();
+    lfo.frequency.value = 1.8;
+    lfoGain.gain.value  = 0.025;
+    lfo.connect(lfoGain);
+    lfoGain.connect(masterGain.gain);
+    lfo.start();
+    oscillators.push(lfo);
+  }
+
+  musicNodes = { masterGain, oscillators };
+}
+
 // ── Constants ────────────────────────────────────────────────────────────────
 const SHIP_SPEED     = 240;   // px/s
 const SHIP_W         = 22;    // half-width of ship triangle
@@ -99,6 +246,8 @@ function resetShipPos() {
 }
 
 function initGame() {
+  ensureAudio();
+  stopMusic();
   score          = 0;
   wave           = 1;
   lastFireTime   = -999;
@@ -130,24 +279,27 @@ function calcRespawnTime(count) {
 function spawnBoss() {
   const bn = bossNumber(wave);
   boss = {
-    x:      canvas.width / 2,
-    y:      -BOSS_BASE_R - 10,
-    alive:  true,
-    hp:     BOSS_BASE_HP * bn,
-    maxHp:  BOSS_BASE_HP * bn,
-    radius: Math.min(BOSS_MAX_R, BOSS_BASE_R + (bn - 1) * 5),
-    speed:  BOSS_BASE_SPEED + (bn - 1) * BOSS_SPEED_SCALE,
-    seed:   Math.random(),
-    hue:    0,
+    x:          canvas.width / 2,
+    y:          -BOSS_BASE_R - 10,
+    alive:      true,
+    hp:         BOSS_BASE_HP * bn,
+    maxHp:      BOSS_BASE_HP * bn,
+    radius:     Math.min(BOSS_MAX_R, BOSS_BASE_R + (bn - 1) * 5),
+    speed:      BOSS_BASE_SPEED + (bn - 1) * BOSS_SPEED_SCALE,
+    seed:       Math.random(),
+    hue:        0,
+    groanTimer: 2 + Math.random() * 3,
   };
 }
 
 function spawnWave() {
   if (isBossWave(wave)) {
     spawnBoss();
+    startMusic('boss');
   } else {
     const count = 3 + (wave - 1) * 2;
     for (let i = 0; i < count; i++) zombies.push(makeZombie());
+    startMusic('normal');
   }
 }
 
@@ -165,6 +317,7 @@ function makeZombie() {
     respawnTimer: 0,
     seed: Math.random(),
     hue: 90 + Math.random() * 50,
+    groanTimer: 2 + Math.random() * 5,
   };
 }
 
@@ -216,6 +369,7 @@ function tryFire() {
   const now = performance.now() / 1000;
   if (now - lastFireTime < FIRE_RATE) return;
   lastFireTime = now;
+  playLaser();
   const tipY = ship.y - SHIP_H / 2;
   // Two parallel lasers from near the ship tip
   lasers.push({ x: ship.x - LASER_GAP, y: tipY - LASER_H, dead: false });
@@ -265,6 +419,12 @@ function updateZombies(dt) {
     if (z.x > W + buf)  z.x -= W + buf * 2;
     if (z.y < -buf)     z.y += H + buf * 2;
     if (z.y > H + buf)  z.y -= H + buf * 2;
+
+    z.groanTimer -= dt;
+    if (z.groanTimer <= 0) {
+      playGroan(false);
+      z.groanTimer = 3 + Math.random() * 6;
+    }
   }
 }
 
@@ -275,6 +435,12 @@ function updateBoss(dt) {
   if (d > 0.5) {
     boss.x += (dx / d) * boss.speed * dt;
     boss.y += (dy / d) * boss.speed * dt;
+  }
+
+  boss.groanTimer -= dt;
+  if (boss.groanTimer <= 0) {
+    playGroan(true);
+    boss.groanTimer = 3 + Math.random() * 4;
   }
 }
 
@@ -323,6 +489,7 @@ function resolveCollisions() {
     if (!z.alive) continue;
     if (Math.hypot(ship.x - z.x, ship.y - z.y) < ZOMBIE_R + SHIP_HIT_R) {
       gameState = 'gameover';
+      stopMusic();
       return;
     }
   }
@@ -331,6 +498,7 @@ function resolveCollisions() {
   if (boss && boss.alive) {
     if (Math.hypot(ship.x - boss.x, ship.y - boss.y) < boss.radius + SHIP_HIT_R) {
       gameState = 'gameover';
+      stopMusic();
       return;
     }
   }
