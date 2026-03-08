@@ -103,15 +103,15 @@ function playLaser() {
   const t   = audioCtx.currentTime;
   const osc = audioCtx.createOscillator();
   const g   = audioCtx.createGain();
-  osc.type = 'sawtooth';
-  osc.frequency.setValueAtTime(880, t);
-  osc.frequency.exponentialRampToValueAtTime(110, t + 0.1);
-  g.gain.setValueAtTime(0.18, t);
-  g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+  osc.type = 'square';
+  osc.frequency.setValueAtTime(1200, t);
+  osc.frequency.exponentialRampToValueAtTime(200, t + 0.12);
+  g.gain.setValueAtTime(0.22, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
   osc.connect(g);
   g.connect(audioCtx.destination);
   osc.start(t);
-  osc.stop(t + 0.14);
+  osc.stop(t + 0.15);
 }
 
 function playGroan(isBoss) {
@@ -120,7 +120,7 @@ function playGroan(isBoss) {
   activeGroans++;
 
   const t        = audioCtx.currentTime;
-  const baseFreq = isBoss ? 52 : 85 + Math.random() * 45;
+  const baseFreq = isBoss ? 42 : 65 + Math.random() * 30;
   const vol      = isBoss ? 0.13 : 0.055;
   const dur      = isBoss ? 0.65 : 0.42;
 
@@ -177,58 +177,92 @@ function startMusic(type) {
   const oscillators = [];
 
   if (type === 'normal') {
-    // Ambient space: three sine layers + slow tremolo LFO
     masterGain.gain.setValueAtTime(0, audioCtx.currentTime);
-    masterGain.gain.linearRampToValueAtTime(0.045, audioCtx.currentTime + 1.0);
+    masterGain.gain.linearRampToValueAtTime(0.055, audioCtx.currentTime + 0.5);
 
-    const freqs = [110, 165, 220];
-    freqs.forEach(f => {
-      const osc = audioCtx.createOscillator();
-      osc.type = 'sine';
-      osc.frequency.value = f;
-      osc.connect(masterGain);
-      osc.start();
-      oscillators.push(osc);
-    });
+    // Melody channel: square wave, scheduled 16-note loop
+    const melOsc  = audioCtx.createOscillator();
+    const melGain = audioCtx.createGain();
+    melOsc.type = 'square';
+    melGain.gain.setValueAtTime(0, audioCtx.currentTime);
+    melOsc.connect(melGain);
+    melGain.connect(masterGain);
+    melOsc.start();
+    oscillators.push(melOsc);
 
-    // Slow tremolo LFO at 0.25 Hz
-    const lfo = audioCtx.createOscillator();
-    const lfoGain = audioCtx.createGain();
-    lfo.frequency.value = 0.25;
-    lfoGain.gain.value  = 0.018;
-    lfo.connect(lfoGain);
-    lfoGain.connect(masterGain.gain);
-    lfo.start();
-    oscillators.push(lfo);
+    // Bass channel: fixed low G2 square pulse
+    const bassOsc  = audioCtx.createOscillator();
+    const bassGain = audioCtx.createGain();
+    bassOsc.type = 'square';
+    bassOsc.frequency.value = 98;
+    bassGain.gain.value = 0.22;
+    bassOsc.connect(bassGain);
+    bassGain.connect(masterGain);
+    bassOsc.start();
+    oscillators.push(bassOsc);
+
+    // Schedule 300 seconds of melody upfront
+    const MEL = [392, 523, 392, 349, 466, 392, 311, 392,
+                 349, 466, 349, 294, 440, 349, 294, 349];
+    const noteLen = 0.12, gap = 0.03;
+    const loopLen = MEL.length * (noteLen + gap);  // 2.4s
+    const t0 = audioCtx.currentTime;
+    const cycles = Math.ceil(300 / loopLen);
+    for (let c = 0; c < cycles; c++) {
+      MEL.forEach((freq, i) => {
+        const ns = t0 + c * loopLen + i * (noteLen + gap);
+        melOsc.frequency.setValueAtTime(freq, ns);
+        melGain.gain.setValueAtTime(0.75, ns);
+        melGain.gain.setValueAtTime(0, ns + noteLen);
+      });
+    }
 
   } else if (type === 'boss') {
-    // Ominous: low sawtooth drone + minor-third + rhythmic pulse LFO
     masterGain.gain.setValueAtTime(0, audioCtx.currentTime);
-    masterGain.gain.linearRampToValueAtTime(0.055, audioCtx.currentTime + 0.8);
+    masterGain.gain.linearRampToValueAtTime(0.07, audioCtx.currentTime + 0.3);
 
-    const filter = audioCtx.createBiquadFilter();
-    filter.type = 'lowpass';
-    filter.frequency.value = 400;
-    filter.connect(masterGain);
+    // WaveShaper distortion
+    const shaper = audioCtx.createWaveShaper();
+    const nc = 256, curve = new Float32Array(nc);
+    for (let i = 0; i < nc; i++) {
+      const x = (i * 2) / nc - 1;
+      curve[i] = Math.tanh(3 * x);
+    }
+    shaper.curve = curve;
+    shaper.connect(masterGain);
 
-    [[55, 'sawtooth'], [82.5, 'square']].forEach(([f, t]) => {
-      const osc = audioCtx.createOscillator();
-      osc.type = t;
-      osc.frequency.value = f;
-      osc.connect(filter);
-      osc.start();
-      oscillators.push(osc);
-    });
+    const bossOsc  = audioCtx.createOscillator();
+    const bossGain = audioCtx.createGain();
+    bossOsc.type = 'sawtooth';
+    bossGain.gain.setValueAtTime(0, audioCtx.currentTime);
+    bossOsc.connect(bossGain);
+    bossGain.connect(shaper);
+    bossOsc.start();
+    oscillators.push(bossOsc);
 
-    // Rhythmic pulse LFO at 1.8 Hz
-    const lfo = audioCtx.createOscillator();
-    const lfoGain = audioCtx.createGain();
-    lfo.frequency.value = 1.8;
-    lfoGain.gain.value  = 0.025;
-    lfo.connect(lfoGain);
-    lfoGain.connect(masterGain.gain);
-    lfo.start();
-    oscillators.push(lfo);
+    // 3-beat descending pattern
+    const BEATS = [
+      { freq: 80, vol: 0.50, dur: 0.28 },
+      { freq: 50, vol: 0.65, dur: 0.32 },
+      { freq: 32, vol: 0.85, dur: 0.42 },
+    ];
+    const beatGap  = 0.45;
+    const silence  = 1.60;
+    const cycleLen = BEATS[0].dur + beatGap + BEATS[1].dur + beatGap + BEATS[2].dur + silence; // 3.52s
+
+    const t0 = audioCtx.currentTime;
+    const cycles = Math.ceil(300 / cycleLen);
+    for (let c = 0; c < cycles; c++) {
+      let tOff = t0 + c * cycleLen;
+      BEATS.forEach((b, bi) => {
+        bossOsc.frequency.setValueAtTime(b.freq, tOff);
+        bossGain.gain.setValueAtTime(0, tOff);
+        bossGain.gain.linearRampToValueAtTime(b.vol, tOff + 0.04);
+        bossGain.gain.setValueAtTime(b.vol * 0.8, tOff + b.dur * 0.5);
+        bossGain.gain.linearRampToValueAtTime(0, tOff + b.dur);
+        if (bi < BEATS.length - 1) tOff += b.dur + beatGap;
+      });
+    }
   }
 
   musicNodes = { masterGain, oscillators };
@@ -656,20 +690,21 @@ function drawZombie(z) {
   if (!z.alive) return;
   const { x, y, hue, seed } = z;
   const r = ZOMBIE_R;
+  const angry = Math.hypot(ship.x - z.x, ship.y - z.y) < Z_AGGRO_DIST;
 
   ctx.save();
   ctx.translate(x, y);
 
   // Body glow
-  ctx.shadowColor = `hsl(${hue},50%,22%)`;
+  ctx.shadowColor = angry ? 'rgba(180,0,0,0.6)' : `hsl(${hue},50%,22%)`;
   ctx.shadowBlur  = 10;
 
   // Body circle
   ctx.beginPath();
   ctx.arc(0, 0, r, 0, Math.PI * 2);
-  ctx.fillStyle   = `hsl(${hue},52%,28%)`;
+  ctx.fillStyle   = angry ? 'hsl(0,70%,22%)' : `hsl(${hue},52%,28%)`;
   ctx.fill();
-  ctx.strokeStyle = `hsl(${hue},40%,18%)`;
+  ctx.strokeStyle = angry ? 'hsl(0,60%,14%)' : `hsl(${hue},40%,18%)`;
   ctx.lineWidth   = 2.5;
   ctx.stroke();
   ctx.shadowBlur  = 0;
@@ -684,16 +719,42 @@ function drawZombie(z) {
     ctx.fillRect(ex - eyeW * 0.18, ey - eyeH * 0.38, eyeW * 0.36, eyeH * 0.76);
   });
 
-  // Mouth background
+  // Angry eyebrows
+  if (angry) {
+    ctx.strokeStyle = '#cc0000';
+    ctx.lineWidth   = 2.5;
+    // Left brow: tilts down toward center
+    ctx.beginPath();
+    ctx.moveTo(-eyeX - eyeW * 0.5, eyeY - eyeH * 1.2);
+    ctx.lineTo(-eyeX + eyeW * 0.4, eyeY - eyeH * 0.4);
+    ctx.stroke();
+    // Right brow: mirror
+    ctx.beginPath();
+    ctx.moveTo(eyeX - eyeW * 0.4, eyeY - eyeH * 0.4);
+    ctx.lineTo(eyeX + eyeW * 0.5, eyeY - eyeH * 1.2);
+    ctx.stroke();
+  }
+
+  // Mouth
   const mY = r * 0.33, mW = r * 0.62, mH = r * 0.22;
-  ctx.fillStyle = '#0a0a0a';
-  ctx.fillRect(-mW / 2, mY, mW, mH);
-  // Blocky teeth (every other slot)
-  ctx.fillStyle = '#c8c8c8';
   const tW = mW / 4;
-  for (let i = 0; i < 4; i++) {
-    if (i % 2 === 0) {
-      ctx.fillRect(-mW / 2 + i * tW + 1, mY + 1, tW - 2, mH - 3);
+  if (angry) {
+    // Snarl: red gums, all teeth bared
+    ctx.fillStyle = '#880000';
+    ctx.fillRect(-mW / 2, mY, mW, mH);
+    ctx.fillStyle = '#e8e8e8';
+    for (let i = 0; i < 4; i++) {
+      ctx.fillRect(-mW / 2 + i * tW + 1, mY + 1, tW - 2, mH - 2);
+    }
+  } else {
+    // Normal mouth
+    ctx.fillStyle = '#0a0a0a';
+    ctx.fillRect(-mW / 2, mY, mW, mH);
+    ctx.fillStyle = '#c8c8c8';
+    for (let i = 0; i < 4; i++) {
+      if (i % 2 === 0) {
+        ctx.fillRect(-mW / 2 + i * tW + 1, mY + 1, tW - 2, mH - 3);
+      }
     }
   }
 
