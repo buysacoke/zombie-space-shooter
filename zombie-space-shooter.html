@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Zombie Space Shooter</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+
+// ── Resize ──────────────────────────────────────────────────────────────────
+function resize() {
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', () => { resize(); generateStars(); });
+
+// ── Stars ────────────────────────────────────────────────────────────────────
+let stars = [];
+function generateStars() {
+  stars = [];
+  for (let i = 0; i < 200; i++) {
+    stars.push({
+      x: Math.random() * canvas.width,
+      y: Math.random() * canvas.height,
+      r: Math.random() * 1.5 + 0.2,
+      a: Math.random() * 0.6 + 0.25,
+    });
+  }
+}
+generateStars();
+
+// ── Input ────────────────────────────────────────────────────────────────────
+const keys = {};
+window.addEventListener('keydown', e => {
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) {
+    e.preventDefault();
+  }
+  keys[e.code] = true;
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// ── Constants ────────────────────────────────────────────────────────────────
+const SHIP_SPEED     = 240;   // px/s
+const SHIP_W         = 22;    // half-width of ship triangle
+const SHIP_H         = 36;    // full height of ship triangle
+const SHIP_HIT_R     = 14;    // ship collision radius
+
+const LASER_SPEED    = 760;   // px/s upward
+const LASER_W        = 3;     // px
+const LASER_H        = 20;    // px
+const LASER_GAP      = 10;    // px from ship center x
+const FIRE_RATE      = 0.15;  // seconds between bursts
+
+const ZOMBIE_R       = 20;    // zombie collision radius
+const Z_SPEED_NORM   = 55;    // px/s toward center
+const Z_SPEED_AGGRO  = 175;   // px/s when player is nearby
+const Z_AGGRO_DIST   = 185;   // px — trigger aggro
+const RESPAWN_TIME   = 10.0;   // seconds for dead zombie to respawn
+
+const WAVE_INTRO_DUR = 2.2;   // seconds for "WAVE N" screen
+
+// ── Game state ───────────────────────────────────────────────────────────────
+// States: 'title' | 'waveIntro' | 'playing' | 'gameover'
+let gameState = 'title';
+let score     = 0;
+let wave      = 1;
+let stateTimer   = 0;
+let lastFireTime = -999;
+
+let ship    = { x: 0, y: 0 };
+let lasers  = [];   // { x (center), y (top), dead }
+let zombies = [];   // { x, y, alive, respawnTimer, seed, hue }
+
+// ── Init / Reset ─────────────────────────────────────────────────────────────
+function resetShipPos() {
+  ship.x = canvas.width  / 2;
+  ship.y = canvas.height * 0.75;
+}
+
+function initGame() {
+  score        = 0;
+  wave         = 1;
+  lastFireTime = -999;
+  lasers       = [];
+  zombies      = [];
+  resetShipPos();
+  beginWaveIntro();
+}
+
+function beginWaveIntro() {
+  lasers     = [];
+  zombies    = [];
+  stateTimer = WAVE_INTRO_DUR;
+  gameState  = 'waveIntro';
+  resetShipPos();
+}
+
+function spawnWave() {
+  const count = 3 + (wave - 1) * 2;
+  for (let i = 0; i < count; i++) {
+    zombies.push(makeZombie());
+  }
+}
+
+function makeZombie() {
+  const W = canvas.width, H = canvas.height;
+  const edge = Math.floor(Math.random() * 4);
+  let x, y;
+  if      (edge === 0) { x = Math.random() * W; y = -ZOMBIE_R - 5; }
+  else if (edge === 1) { x = Math.random() * W; y = H + ZOMBIE_R + 5; }
+  else if (edge === 2) { x = -ZOMBIE_R - 5;     y = Math.random() * H; }
+  else                 { x = W + ZOMBIE_R + 5;  y = Math.random() * H; }
+  return {
+    x, y,
+    alive: true,
+    respawnTimer: 0,
+    seed: Math.random(),
+    hue: 90 + Math.random() * 50,
+  };
+}
+
+// ── Update ────────────────────────────────────────────────────────────────────
+function update(dt) {
+  // Title or gameover: press Space to continue
+  if (gameState === 'title' || gameState === 'gameover') {
+    if (keys['Space']) {
+      keys['Space'] = false;
+      initGame();
+    }
+    return;
+  }
+
+  // Wave intro countdown
+  if (gameState === 'waveIntro') {
+    stateTimer -= dt;
+    if (stateTimer <= 0) {
+      spawnWave();
+      gameState = 'playing';
+    }
+    return;
+  }
+
+  // Playing
+  updateShip(dt);
+  updateLasers(dt);
+  updateZombies(dt);
+  tryFire();
+  resolveCollisions();
+}
+
+function updateShip(dt) {
+  if (keys['ArrowLeft'])  ship.x -= SHIP_SPEED * dt;
+  if (keys['ArrowRight']) ship.x += SHIP_SPEED * dt;
+  if (keys['ArrowUp'])    ship.y -= SHIP_SPEED * dt;
+  if (keys['ArrowDown'])  ship.y += SHIP_SPEED * dt;
+
+  // Clamp within screen
+  const hw = SHIP_W + 2, hh = SHIP_H / 2 + 2;
+  ship.x = Math.max(hw, Math.min(canvas.width  - hw, ship.x));
+  ship.y = Math.max(hh, Math.min(canvas.height - hh, ship.y));
+}
+
+function tryFire() {
+  if (!keys['Space']) return;
+  const now = performance.now() / 1000;
+  if (now - lastFireTime < FIRE_RATE) return;
+  lastFireTime = now;
+  const tipY = ship.y - SHIP_H / 2;
+  // Two parallel lasers from near the ship tip
+  lasers.push({ x: ship.x - LASER_GAP, y: tipY - LASER_H, dead: false });
+  lasers.push({ x: ship.x + LASER_GAP, y: tipY - LASER_H, dead: false });
+}
+
+function updateLasers(dt) {
+  for (const l of lasers) l.y -= LASER_SPEED * dt;
+  lasers = lasers.filter(l => !l.dead && l.y + LASER_H > 0);
+}
+
+function updateZombies(dt) {
+  const W = canvas.width, H = canvas.height;
+
+  for (const z of zombies) {
+    if (!z.alive) {
+      // Countdown to respawn
+      z.respawnTimer -= dt;
+      if (z.respawnTimer <= 0) {
+        const fresh = makeZombie();
+        z.x = fresh.x;
+        z.y = fresh.y;
+        z.alive = true;
+      }
+      continue;
+    }
+
+    // Choose target and speed
+    const distToShip = Math.hypot(ship.x - z.x, ship.y - z.y);
+    let tx, ty, spd;
+    if (distToShip < Z_AGGRO_DIST) {
+      tx = ship.x; ty = ship.y; spd = Z_SPEED_AGGRO;
+    } else {
+      tx = W / 2; ty = H / 2; spd = Z_SPEED_NORM;
+    }
+
+    const dx = tx - z.x, dy = ty - z.y;
+    const d  = Math.hypot(dx, dy);
+    if (d > 0.5) {
+      z.x += (dx / d) * spd * dt;
+      z.y += (dy / d) * spd * dt;
+    }
+
+    // Wrap around screen edges
+    const buf = ZOMBIE_R + 5;
+    if (z.x < -buf)     z.x += W + buf * 2;
+    if (z.x > W + buf)  z.x -= W + buf * 2;
+    if (z.y < -buf)     z.y += H + buf * 2;
+    if (z.y > H + buf)  z.y -= H + buf * 2;
+  }
+}
+
+function resolveCollisions() {
+  // Lasers vs zombies (AABB rect x circle)
+  for (const l of lasers) {
+    if (l.dead) continue;
+    const lLeft = l.x - LASER_W / 2, lRight = l.x + LASER_W / 2;
+    const lTop  = l.y,               lBot   = l.y + LASER_H;
+    for (const z of zombies) {
+      if (!z.alive) continue;
+      const nearX = Math.max(lLeft, Math.min(z.x, lRight));
+      const nearY = Math.max(lTop,  Math.min(z.y, lBot));
+      if ((nearX - z.x) ** 2 + (nearY - z.y) ** 2 < ZOMBIE_R ** 2) {
+        z.alive        = false;
+        z.respawnTimer = RESPAWN_TIME;
+        score++;
+        l.dead = true;
+        break;
+      }
+    }
+  }
+
+  // Ship vs zombies
+  for (const z of zombies) {
+    if (!z.alive) continue;
+    if (Math.hypot(ship.x - z.x, ship.y - z.y) < ZOMBIE_R + SHIP_HIT_R) {
+      gameState = 'gameover';
+      return;
+    }
+  }
+
+  // Wave complete: all zombies dead simultaneously
+  if (zombies.length > 0 && !zombies.some(z => z.alive)) {
+    wave++;
+    beginWaveIntro();
+  }
+}
+
+// ── Draw ──────────────────────────────────────────────────────────────────────
+function draw() {
+  // Background
+  ctx.fillStyle = '#00000f';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  drawStars();
+
+  if (gameState === 'title') {
+    drawTitle();
+    return;
+  }
+
+  if (gameState === 'waveIntro') {
+    drawWaveIntro();
+    return;
+  }
+
+  // playing or gameover — render game world
+  drawZombies();
+  drawLasers();
+  drawShip();
+  drawHUD();
+
+  if (gameState === 'gameover') {
+    drawGameOver();
+  }
+}
+
+function drawStars() {
+  for (const s of stars) {
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,255,255,${s.a})`;
+    ctx.fill();
+  }
+}
+
+function drawShip() {
+  ctx.save();
+  ctx.translate(ship.x, ship.y);
+
+  // Thruster glow when moving
+  const moving = keys['ArrowUp'] || keys['ArrowDown'] ||
+                 keys['ArrowLeft'] || keys['ArrowRight'];
+  if (moving) {
+    const grad = ctx.createRadialGradient(0, SHIP_H * 0.35, 0, 0, SHIP_H * 0.35, 14);
+    grad.addColorStop(0, 'rgba(0,180,255,0.55)');
+    grad.addColorStop(1, 'rgba(0,180,255,0)');
+    ctx.beginPath();
+    ctx.arc(0, SHIP_H * 0.35, 14, 0, Math.PI * 2);
+    ctx.fillStyle = grad;
+    ctx.fill();
+  }
+
+  // Ship triangle (tip points up)
+  ctx.beginPath();
+  ctx.moveTo(0, -SHIP_H / 2);
+  ctx.lineTo( SHIP_W,  SHIP_H / 2);
+  ctx.lineTo(-SHIP_W,  SHIP_H / 2);
+  ctx.closePath();
+  ctx.fillStyle   = '#00e87c';
+  ctx.fill();
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth   = 1.5;
+  ctx.stroke();
+
+  // Cockpit window
+  ctx.beginPath();
+  ctx.arc(0, -4, 5, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(160,230,255,0.85)';
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawLasers() {
+  ctx.save();
+  ctx.shadowColor = '#ff44bb';
+  ctx.shadowBlur  = 12;
+  ctx.fillStyle   = '#ff66cc';
+  for (const l of lasers) {
+    if (l.dead) continue;
+    ctx.fillRect(l.x - LASER_W / 2, l.y, LASER_W, LASER_H);
+  }
+  ctx.restore();
+}
+
+function drawZombie(z) {
+  if (!z.alive) return;
+  const { x, y, hue, seed } = z;
+  const r = ZOMBIE_R;
+
+  ctx.save();
+  ctx.translate(x, y);
+
+  // Body glow
+  ctx.shadowColor = `hsl(${hue},50%,22%)`;
+  ctx.shadowBlur  = 10;
+
+  // Body circle
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.fillStyle   = `hsl(${hue},52%,28%)`;
+  ctx.fill();
+  ctx.strokeStyle = `hsl(${hue},40%,18%)`;
+  ctx.lineWidth   = 2.5;
+  ctx.stroke();
+  ctx.shadowBlur  = 0;
+
+  // Eyes
+  const eyeX = r * 0.3, eyeY = -r * 0.18;
+  const eyeW = r * 0.32, eyeH = r * 0.26;
+  [[-eyeX, eyeY], [eyeX, eyeY]].forEach(([ex, ey]) => {
+    ctx.fillStyle = '#ddd';
+    ctx.fillRect(ex - eyeW / 2, ey - eyeH / 2, eyeW, eyeH);
+    ctx.fillStyle = '#bb0000';
+    ctx.fillRect(ex - eyeW * 0.18, ey - eyeH * 0.38, eyeW * 0.36, eyeH * 0.76);
+  });
+
+  // Mouth background
+  const mY = r * 0.33, mW = r * 0.62, mH = r * 0.22;
+  ctx.fillStyle = '#0a0a0a';
+  ctx.fillRect(-mW / 2, mY, mW, mH);
+  // Blocky teeth (every other slot)
+  ctx.fillStyle = '#c8c8c8';
+  const tW = mW / 4;
+  for (let i = 0; i < 4; i++) {
+    if (i % 2 === 0) {
+      ctx.fillRect(-mW / 2 + i * tW + 1, mY + 1, tW - 2, mH - 3);
+    }
+  }
+
+  // Scar (half of zombies, based on seed)
+  if (seed > 0.5) {
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.12, -r * 0.55);
+    ctx.lineTo( r * 0.05, -r * 0.15);
+    ctx.strokeStyle = '#8b0000';
+    ctx.lineWidth   = 1.8;
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function drawZombies() {
+  for (const z of zombies) drawZombie(z);
+}
+
+function drawHUD() {
+  const pad = 22;
+
+  ctx.font      = 'bold 22px monospace';
+  ctx.fillStyle = '#ffffff';
+
+  ctx.textAlign = 'left';
+  ctx.fillText(`WAVE  ${wave}`, pad, 40);
+
+  ctx.textAlign = 'right';
+  ctx.fillText(`SCORE  ${score}`, canvas.width - pad, 40);
+
+  // Zombie counter
+  const alive = zombies.filter(z => z.alive).length;
+  const total = zombies.length;
+  ctx.textAlign = 'center';
+  ctx.font      = '16px monospace';
+  ctx.fillStyle = '#999';
+  ctx.fillText(`Zombies  ${alive} / ${total}`, canvas.width / 2, 40);
+
+  // Respawn warning
+  const pending = zombies.filter(z => !z.alive && z.respawnTimer > 0);
+  if (pending.length > 0) {
+    const minT = Math.min(...pending.map(z => z.respawnTimer));
+    ctx.fillStyle = minT < 2 ? '#ff3300' : '#ff8800';
+    ctx.font      = '15px monospace';
+    const label = pending.length === 1 ? '1 zombie' : `${pending.length} zombies`;
+    ctx.fillText(`! ${label} respawn in ${minT.toFixed(1)}s`, canvas.width / 2, 64);
+  }
+}
+
+function drawWaveIntro() {
+  const cx = canvas.width / 2, cy = canvas.height / 2;
+
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.save();
+  ctx.textAlign   = 'center';
+  ctx.font        = 'bold 76px monospace';
+  ctx.fillStyle   = '#00e87c';
+  ctx.shadowColor = '#00e87c';
+  ctx.shadowBlur  = 24;
+  ctx.fillText(`WAVE  ${wave}`, cx, cy);
+  ctx.shadowBlur  = 0;
+  ctx.font        = '26px monospace';
+  ctx.fillStyle   = '#aaa';
+  ctx.fillText('Get ready!', cx, cy + 54);
+  ctx.restore();
+}
+
+function drawTitle() {
+  const cx = canvas.width / 2, cy = canvas.height / 2;
+
+  ctx.save();
+  ctx.textAlign   = 'center';
+  ctx.font        = 'bold 56px monospace';
+  ctx.fillStyle   = '#00e87c';
+  ctx.shadowColor = '#00e87c';
+  ctx.shadowBlur  = 20;
+  ctx.fillText('ZOMBIE', cx, cy - 60);
+  ctx.fillText('SPACE SHOOTER', cx, cy);
+  ctx.shadowBlur  = 0;
+  ctx.font        = '20px monospace';
+  ctx.fillStyle   = '#888';
+  ctx.fillText('Arrow keys to move  ·  Space to fire', cx, cy + 52);
+  ctx.fillStyle   = '#ccc';
+  ctx.font        = 'bold 20px monospace';
+  ctx.fillText('Press SPACE to start', cx, cy + 90);
+  ctx.restore();
+}
+
+function drawGameOver() {
+  const cx = canvas.width / 2, cy = canvas.height / 2;
+
+  ctx.fillStyle = 'rgba(0,0,0,0.75)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.save();
+  ctx.textAlign   = 'center';
+  ctx.font        = 'bold 72px monospace';
+  ctx.fillStyle   = '#ff2020';
+  ctx.shadowColor = '#ff2020';
+  ctx.shadowBlur  = 24;
+  ctx.fillText('GAME OVER', cx, cy - 24);
+  ctx.shadowBlur  = 0;
+  ctx.font        = '28px monospace';
+  ctx.fillStyle   = '#fff';
+  ctx.fillText(`Wave ${wave}  ·  Score ${score}`, cx, cy + 36);
+  ctx.font        = '20px monospace';
+  ctx.fillStyle   = '#777';
+  ctx.fillText('Press SPACE to play again', cx, cy + 80);
+  ctx.restore();
+}
+
+// ── Game loop ─────────────────────────────────────────────────────────────────
+let prevTime = null;
+
+function loop(ts) {
+  if (prevTime === null) prevTime = ts;
+  const dt = Math.min((ts - prevTime) / 1000, 0.05); // cap at 50ms
+  prevTime = ts;
+
+  update(dt);
+  draw();
+
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
