@@ -64,10 +64,15 @@ const LASER_GAP      = 10;    // px from ship center x
 const FIRE_RATE      = 0.15;  // seconds between bursts
 
 const ZOMBIE_R       = 20;    // zombie collision radius
-const Z_SPEED_NORM   = 55;    // px/s toward center
+const Z_SPEED_NORM   = 55;    // px/s toward player
 const Z_SPEED_AGGRO  = 175;   // px/s when player is nearby
-const Z_AGGRO_DIST   = 185;   // px — trigger aggro
-const RESPAWN_TIME   = 10.0;   // seconds for dead zombie to respawn
+const Z_AGGRO_DIST   = 150;   // px — trigger aggro
+
+const BOSS_BASE_HP     = 10;  // boss 1 HP; each successive boss +10
+const BOSS_BASE_SPEED  = 42;  // px/s — boss 1 speed
+const BOSS_SPEED_SCALE = 18;  // px/s added per boss number
+const BOSS_BASE_R      = 65;  // px — boss 1 radius
+const BOSS_MAX_R       = 80;  // cap boss radius growth
 
 const WAVE_INTRO_DUR = 2.2;   // seconds for "WAVE N" screen
 
@@ -83,6 +88,10 @@ let ship    = { x: 0, y: 0 };
 let lasers  = [];   // { x (center), y (top), dead }
 let zombies = [];   // { x, y, alive, respawnTimer, seed, hue }
 
+let boss           = null;  // null when no boss active
+let bossesDefeated = 0;     // count of bosses killed this run
+let shipSpeedMult  = 1.0;   // multiplied into SHIP_SPEED; +0.1 per boss kill
+
 // ── Init / Reset ─────────────────────────────────────────────────────────────
 function resetShipPos() {
   ship.x = canvas.width  / 2;
@@ -90,11 +99,14 @@ function resetShipPos() {
 }
 
 function initGame() {
-  score        = 0;
-  wave         = 1;
-  lastFireTime = -999;
-  lasers       = [];
-  zombies      = [];
+  score          = 0;
+  wave           = 1;
+  lastFireTime   = -999;
+  bossesDefeated = 0;
+  shipSpeedMult  = 1.0;
+  boss           = null;
+  lasers         = [];
+  zombies        = [];
   resetShipPos();
   beginWaveIntro();
 }
@@ -102,15 +114,40 @@ function initGame() {
 function beginWaveIntro() {
   lasers     = [];
   zombies    = [];
+  boss       = null;
   stateTimer = WAVE_INTRO_DUR;
   gameState  = 'waveIntro';
   resetShipPos();
 }
 
+function isBossWave(w) { return w % 6 === 0; }
+function bossNumber(w) { return w / 6; }
+
+function calcRespawnTime(count) {
+  return Math.max(3, 5 + Math.floor((count - 3) / 2));
+}
+
+function spawnBoss() {
+  const bn = bossNumber(wave);
+  boss = {
+    x:      canvas.width / 2,
+    y:      -BOSS_BASE_R - 10,
+    alive:  true,
+    hp:     BOSS_BASE_HP * bn,
+    maxHp:  BOSS_BASE_HP * bn,
+    radius: Math.min(BOSS_MAX_R, BOSS_BASE_R + (bn - 1) * 5),
+    speed:  BOSS_BASE_SPEED + (bn - 1) * BOSS_SPEED_SCALE,
+    seed:   Math.random(),
+    hue:    0,
+  };
+}
+
 function spawnWave() {
-  const count = 3 + (wave - 1) * 2;
-  for (let i = 0; i < count; i++) {
-    zombies.push(makeZombie());
+  if (isBossWave(wave)) {
+    spawnBoss();
+  } else {
+    const count = 3 + (wave - 1) * 2;
+    for (let i = 0; i < count; i++) zombies.push(makeZombie());
   }
 }
 
@@ -156,15 +193,17 @@ function update(dt) {
   updateShip(dt);
   updateLasers(dt);
   updateZombies(dt);
+  updateBoss(dt);
   tryFire();
   resolveCollisions();
 }
 
 function updateShip(dt) {
-  if (keys['ArrowLeft'])  ship.x -= SHIP_SPEED * dt;
-  if (keys['ArrowRight']) ship.x += SHIP_SPEED * dt;
-  if (keys['ArrowUp'])    ship.y -= SHIP_SPEED * dt;
-  if (keys['ArrowDown'])  ship.y += SHIP_SPEED * dt;
+  const spd = SHIP_SPEED * shipSpeedMult;
+  if (keys['ArrowLeft'])  ship.x -= spd * dt;
+  if (keys['ArrowRight']) ship.x += spd * dt;
+  if (keys['ArrowUp'])    ship.y -= spd * dt;
+  if (keys['ArrowDown'])  ship.y += spd * dt;
 
   // Clamp within screen
   const hw = SHIP_W + 2, hh = SHIP_H / 2 + 2;
@@ -210,7 +249,7 @@ function updateZombies(dt) {
     if (distToShip < Z_AGGRO_DIST) {
       tx = ship.x; ty = ship.y; spd = Z_SPEED_AGGRO;
     } else {
-      tx = W / 2; ty = H / 2; spd = Z_SPEED_NORM;
+      tx = ship.x; ty = ship.y; spd = Z_SPEED_NORM;
     }
 
     const dx = tx - z.x, dy = ty - z.y;
@@ -229,6 +268,16 @@ function updateZombies(dt) {
   }
 }
 
+function updateBoss(dt) {
+  if (!boss || !boss.alive) return;
+  const dx = ship.x - boss.x, dy = ship.y - boss.y;
+  const d  = Math.hypot(dx, dy);
+  if (d > 0.5) {
+    boss.x += (dx / d) * boss.speed * dt;
+    boss.y += (dy / d) * boss.speed * dt;
+  }
+}
+
 function resolveCollisions() {
   // Lasers vs zombies (AABB rect x circle)
   for (const l of lasers) {
@@ -241,10 +290,30 @@ function resolveCollisions() {
       const nearY = Math.max(lTop,  Math.min(z.y, lBot));
       if ((nearX - z.x) ** 2 + (nearY - z.y) ** 2 < ZOMBIE_R ** 2) {
         z.alive        = false;
-        z.respawnTimer = RESPAWN_TIME;
+        z.respawnTimer = calcRespawnTime(zombies.length);
         score++;
         l.dead = true;
         break;
+      }
+    }
+  }
+
+  // Lasers vs boss
+  if (boss && boss.alive) {
+    for (const l of lasers) {
+      if (l.dead) continue;
+      const lLeft = l.x - LASER_W / 2, lRight = l.x + LASER_W / 2;
+      const lTop  = l.y,               lBot   = l.y + LASER_H;
+      const nearX = Math.max(lLeft, Math.min(boss.x, lRight));
+      const nearY = Math.max(lTop,  Math.min(boss.y, lBot));
+      if ((nearX - boss.x) ** 2 + (nearY - boss.y) ** 2 < boss.radius ** 2) {
+        boss.hp--;
+        l.dead = true;
+        if (boss.hp <= 0) {
+          boss.alive = false;
+          bossesDefeated++;
+          shipSpeedMult += 0.1;
+        }
       }
     }
   }
@@ -258,8 +327,18 @@ function resolveCollisions() {
     }
   }
 
-  // Wave complete: all zombies dead simultaneously
-  if (zombies.length > 0 && !zombies.some(z => z.alive)) {
+  // Ship vs boss
+  if (boss && boss.alive) {
+    if (Math.hypot(ship.x - boss.x, ship.y - boss.y) < boss.radius + SHIP_HIT_R) {
+      gameState = 'gameover';
+      return;
+    }
+  }
+
+  // Wave complete: all zombies dead, or boss dead
+  const allZombiesDead = zombies.length > 0 && !zombies.some(z => z.alive);
+  const bossDead       = boss && !boss.alive;
+  if (allZombiesDead || bossDead) {
     wave++;
     beginWaveIntro();
   }
@@ -285,9 +364,11 @@ function draw() {
 
   // playing or gameover — render game world
   drawZombies();
+  drawBoss();
   drawLasers();
   drawShip();
   drawHUD();
+  drawBossHealthBar();
 
   if (gameState === 'gameover') {
     drawGameOver();
@@ -415,6 +496,80 @@ function drawZombies() {
   for (const z of zombies) drawZombie(z);
 }
 
+function drawBoss() {
+  if (!boss || !boss.alive) return;
+  const { x, y, radius: r } = boss;
+  ctx.save();
+  ctx.translate(x, y);
+
+  // Glow
+  ctx.shadowColor = '#ff0000';
+  ctx.shadowBlur  = 20;
+
+  // Body
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.fillStyle   = '#5a0a0a';
+  ctx.fill();
+  ctx.strokeStyle = '#ff2222';
+  ctx.lineWidth   = 4;
+  ctx.stroke();
+  ctx.shadowBlur  = 0;
+
+  // Horns
+  ctx.fillStyle = '#cc0000';
+  [[-r * 0.4, -r], [r * 0.4, -r]].forEach(([hx, hy]) => {
+    ctx.beginPath();
+    ctx.moveTo(hx, hy);
+    ctx.lineTo(hx - r * 0.15, hy + r * 0.35);
+    ctx.lineTo(hx + r * 0.15, hy + r * 0.35);
+    ctx.closePath();
+    ctx.fill();
+  });
+
+  // Eyes
+  const eyeX = r * 0.32, eyeY = -r * 0.18, eyeW = r * 0.28, eyeH = r * 0.22;
+  [[-eyeX, eyeY], [eyeX, eyeY]].forEach(([ex, ey]) => {
+    ctx.fillStyle = '#ddd';
+    ctx.fillRect(ex - eyeW / 2, ey - eyeH / 2, eyeW, eyeH);
+    ctx.fillStyle = '#ff0000';
+    ctx.fillRect(ex - eyeW * 0.18, ey - eyeH * 0.38, eyeW * 0.36, eyeH * 0.76);
+  });
+
+  // Mouth
+  const mY = r * 0.33, mW = r * 0.65, mH = r * 0.22;
+  ctx.fillStyle = '#0a0a0a';
+  ctx.fillRect(-mW / 2, mY, mW, mH);
+  ctx.fillStyle = '#eee';
+  const tW = mW / 4;
+  for (let i = 0; i < 4; i++) {
+    if (i % 2 === 0) ctx.fillRect(-mW / 2 + i * tW + 1, mY + 1, tW - 2, mH - 3);
+  }
+
+  ctx.restore();
+}
+
+function drawBossHealthBar() {
+  if (!boss || !boss.alive) return;
+  const barW = Math.min(400, canvas.width * 0.45);
+  const barH = 22;
+  const cx   = canvas.width / 2;
+  const y    = 78;
+  const pct  = boss.hp / boss.maxHp;
+
+  ctx.fillStyle = '#333';
+  ctx.fillRect(cx - barW / 2, y, barW, barH);
+  ctx.fillStyle = pct > 0.5 ? '#ff4400' : '#ff0000';
+  ctx.fillRect(cx - barW / 2, y, barW * pct, barH);
+  ctx.strokeStyle = '#ff6666';
+  ctx.lineWidth   = 2;
+  ctx.strokeRect(cx - barW / 2, y, barW, barH);
+  ctx.fillStyle   = '#fff';
+  ctx.font        = 'bold 14px monospace';
+  ctx.textAlign   = 'center';
+  ctx.fillText(`BOSS  ${boss.hp} / ${boss.maxHp}`, cx, y + 15);
+}
+
 function drawHUD() {
   const pad = 22;
 
@@ -453,16 +608,28 @@ function drawWaveIntro() {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   ctx.save();
-  ctx.textAlign   = 'center';
-  ctx.font        = 'bold 76px monospace';
-  ctx.fillStyle   = '#00e87c';
-  ctx.shadowColor = '#00e87c';
-  ctx.shadowBlur  = 24;
-  ctx.fillText(`WAVE  ${wave}`, cx, cy);
-  ctx.shadowBlur  = 0;
-  ctx.font        = '26px monospace';
-  ctx.fillStyle   = '#aaa';
-  ctx.fillText('Get ready!', cx, cy + 54);
+  ctx.textAlign = 'center';
+  if (isBossWave(wave)) {
+    ctx.font        = 'bold 72px monospace';
+    ctx.fillStyle   = '#ff2222';
+    ctx.shadowColor = '#ff2222';
+    ctx.shadowBlur  = 28;
+    ctx.fillText('BOSS WAVE!', cx, cy);
+    ctx.shadowBlur  = 0;
+    ctx.font        = '26px monospace';
+    ctx.fillStyle   = '#ff9999';
+    ctx.fillText(`Wave ${wave}  ·  Prepare yourself`, cx, cy + 54);
+  } else {
+    ctx.font        = 'bold 76px monospace';
+    ctx.fillStyle   = '#00e87c';
+    ctx.shadowColor = '#00e87c';
+    ctx.shadowBlur  = 24;
+    ctx.fillText(`WAVE  ${wave}`, cx, cy);
+    ctx.shadowBlur  = 0;
+    ctx.font        = '26px monospace';
+    ctx.fillStyle   = '#aaa';
+    ctx.fillText('Get ready!', cx, cy + 54);
+  }
   ctx.restore();
 }
 
