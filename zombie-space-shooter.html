@@ -7,7 +7,7 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
-    canvas { display: block; }
+    canvas { display: block; touch-action: none; user-select: none; }
   </style>
 </head>
 <body>
@@ -50,6 +50,42 @@ window.addEventListener('keydown', e => {
   keys[e.code] = true;
 });
 window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+const isTouchDevice = ('ontouchstart' in window || navigator.maxTouchPoints > 0);
+let touchTarget  = null;   // { x, y } — where ship should move toward, or null
+let touchFiring  = false;  // true while finger is on the FIRE button
+
+function fireBtnPos() {
+  return { x: canvas.width - 100, y: canvas.height - 100 };
+}
+
+function handleTouches(e) {
+  if (gameState === 'title' || gameState === 'gameover') {
+    if (e.type === 'touchstart') {
+      keys['Space'] = true;
+      setTimeout(() => { keys['Space'] = false; }, 100);
+    }
+    return;
+  }
+  const btn = fireBtnPos();
+  touchTarget = null;
+  touchFiring = false;
+  for (const t of e.touches) {
+    if (Math.hypot(t.clientX - btn.x, t.clientY - btn.y) < FIRE_BTN_R) {
+      touchFiring = true;
+    } else {
+      touchTarget = { x: t.clientX, y: t.clientY };
+    }
+  }
+}
+
+canvas.addEventListener('touchstart', e => { e.preventDefault(); handleTouches(e); }, { passive: false });
+canvas.addEventListener('touchmove',  e => { e.preventDefault(); handleTouches(e); }, { passive: false });
+canvas.addEventListener('touchend',   e => {
+  e.preventDefault();
+  if (e.touches.length === 0) { touchTarget = null; touchFiring = false; return; }
+  handleTouches(e);
+}, { passive: false });
 
 // ── Audio ─────────────────────────────────────────────────────────────────────
 let audioCtx     = null;
@@ -222,6 +258,7 @@ const BOSS_BASE_R      = 65;  // px — boss 1 radius
 const BOSS_MAX_R       = 80;  // cap boss radius growth
 
 const WAVE_INTRO_DUR = 2.2;   // seconds for "WAVE N" screen
+const FIRE_BTN_R     = 72;   // fire button radius px
 
 // ── Game state ───────────────────────────────────────────────────────────────
 // States: 'title' | 'waveIntro' | 'playing' | 'gameover'
@@ -358,6 +395,18 @@ function updateShip(dt) {
   if (keys['ArrowUp'])    ship.y -= spd * dt;
   if (keys['ArrowDown'])  ship.y += spd * dt;
 
+  // Touch drag movement — move ship toward touchTarget
+  if (touchTarget) {
+    const dx = touchTarget.x - ship.x;
+    const dy = touchTarget.y - ship.y;
+    const d  = Math.hypot(dx, dy);
+    if (d > 4) {
+      const move = Math.min(spd * dt, d);
+      ship.x += (dx / d) * move;
+      ship.y += (dy / d) * move;
+    }
+  }
+
   // Clamp within screen
   const hw = SHIP_W + 2, hh = SHIP_H / 2 + 2;
   ship.x = Math.max(hw, Math.min(canvas.width  - hw, ship.x));
@@ -365,7 +414,7 @@ function updateShip(dt) {
 }
 
 function tryFire() {
-  if (!keys['Space']) return;
+  if (!keys['Space'] && !touchFiring) return;
   const now = performance.now() / 1000;
   if (now - lastFireTime < FIRE_RATE) return;
   lastFireTime = now;
@@ -537,6 +586,7 @@ function draw() {
   drawShip();
   drawHUD();
   drawBossHealthBar();
+  drawFireButton();
 
   if (gameState === 'gameover') {
     drawGameOver();
@@ -717,6 +767,26 @@ function drawBoss() {
   ctx.restore();
 }
 
+function drawFireButton() {
+  if (!isTouchDevice) return;
+  if (gameState === 'title' || gameState === 'gameover' || gameState === 'waveIntro') return;
+  const { x, y } = fireBtnPos();
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y, FIRE_BTN_R, 0, Math.PI * 2);
+  ctx.fillStyle = touchFiring ? 'rgba(255,100,200,0.55)' : 'rgba(255,100,200,0.25)';
+  ctx.fill();
+  ctx.strokeStyle = touchFiring ? 'rgba(255,100,200,0.9)' : 'rgba(255,100,200,0.5)';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.font = 'bold 26px monospace';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('FIRE', x, y);
+  ctx.restore();
+}
+
 function drawBossHealthBar() {
   if (!boss || !boss.alive) return;
   const barW = Math.min(400, canvas.width * 0.45);
@@ -815,10 +885,12 @@ function drawTitle() {
   ctx.shadowBlur  = 0;
   ctx.font        = '20px monospace';
   ctx.fillStyle   = '#888';
-  ctx.fillText('Arrow keys to move  ·  Space to fire', cx, cy + 52);
+  ctx.fillText(isTouchDevice
+    ? 'Drag to move  ·  FIRE button to shoot'
+    : 'Arrow keys to move  ·  Space to fire', cx, cy + 52);
   ctx.fillStyle   = '#ccc';
   ctx.font        = 'bold 20px monospace';
-  ctx.fillText('Press SPACE to start', cx, cy + 90);
+  ctx.fillText(isTouchDevice ? 'Tap to start' : 'Press SPACE to start', cx, cy + 90);
   ctx.restore();
 }
 
@@ -841,7 +913,7 @@ function drawGameOver() {
   ctx.fillText(`Wave ${wave}  ·  Score ${score}`, cx, cy + 36);
   ctx.font        = '20px monospace';
   ctx.fillStyle   = '#777';
-  ctx.fillText('Press SPACE to play again', cx, cy + 80);
+  ctx.fillText(isTouchDevice ? 'Tap to play again' : 'Press SPACE to play again', cx, cy + 80);
   ctx.restore();
 }
 
