@@ -12,6 +12,18 @@
 </head>
 <body>
 <canvas id="c"></canvas>
+<div id="nameEntryUI" style="display:none; position:fixed; top:50%; left:50%;
+  transform:translate(-50%,-50%); text-align:center; z-index:10;">
+  <div style="font:bold 28px monospace; color:#ff2020; margin-bottom:16px;">GAME OVER</div>
+  <div style="font:20px monospace; color:#fff; margin-bottom:12px;">Enter your name:</div>
+  <input id="nameInput" type="text" maxlength="16" autocomplete="off"
+    style="font:22px monospace; background:#111; color:#00ff88; border:2px solid #00ff88;
+    padding:8px 12px; width:220px; outline:none; text-align:center;">
+  <br><br>
+  <button id="nameSubmit"
+    style="font:bold 20px monospace; background:#00aa44; color:#fff; border:none;
+    padding:10px 32px; cursor:pointer; border-radius:4px;">SUBMIT</button>
+</div>
 <script>
 'use strict';
 
@@ -441,7 +453,7 @@ function drawParticles() {
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const SHIP_SPEED     = 346;
+const SHIP_SPEED     = 415;
 const SHIP_W         = 22;
 const SHIP_H         = 36;
 const SHIP_HIT_R     = 14;
@@ -453,7 +465,7 @@ const LASER_GAP      = 10;
 const FIRE_RATE      = 0.15;
 
 const ZOMBIE_R       = 20;
-const Z_SPEED_NORM   = 55;
+const Z_SPEED_NORM   = 63;
 const Z_SPEED_AGGRO  = 175;
 const Z_AGGRO_DIST   = 188;
 
@@ -480,7 +492,7 @@ const BOSS_DIE_DUR        = 2.5;
 const ZOMBIE_LAUGH_DUR    = 3.0;
 
 // ── Game state ────────────────────────────────────────────────────────────────
-// States: 'title' | 'waveIntro' | 'playing' | 'shipDying' | 'zombieLaugh' | 'bossDying' | 'waveEnd' | 'highscores'
+// States: 'title' | 'waveIntro' | 'playing' | 'shipDying' | 'zombieLaugh' | 'bossDying' | 'waveEnd' | 'nameEntry' | 'highscores'
 let gameState = 'title';
 let score     = 0;
 let wave      = 1;
@@ -501,6 +513,7 @@ const bossLasers = [];
 let boss           = null;
 let bossesDefeated = 0;
 let shipSpeedMult  = 1.0;
+let zombieSpeedMult = 1.0;   // +0.2 per boss defeated
 
 // ── Init / Reset ──────────────────────────────────────────────────────────────
 function resetShipPos() {
@@ -514,8 +527,9 @@ function initGame() {
   score          = 0;
   wave           = 1;
   lastFireTime   = -999;
-  bossesDefeated = 0;
-  shipSpeedMult  = 1.0;
+  bossesDefeated  = 0;
+  shipSpeedMult   = 1.0;
+  zombieSpeedMult = 1.0;
   boss           = null;
   lasers         = [];
   zombies        = [];
@@ -527,6 +541,7 @@ function initGame() {
   ship.immuneTimer = 0;
   screenFlash      = 0;
   lastScore        = null;
+  hideNameEntry();
   resetShipPos();
   beginWaveIntro();
 }
@@ -624,12 +639,46 @@ function killShip(zombieIdx) {
   }
 }
 
-function enterGameOver() {
-  lastScore = { wave, kills: score };
-  highScores.push({ wave, kills: score });
+const nameEntryUI = document.getElementById('nameEntryUI');
+const nameInput   = document.getElementById('nameInput');
+const nameSubmit  = document.getElementById('nameSubmit');
+
+function showNameEntry() {
+  nameInput.value = '';
+  nameEntryUI.style.display = 'block';
+  setTimeout(() => nameInput.focus(), 80);
+}
+
+function hideNameEntry() {
+  nameEntryUI.style.display = 'none';
+}
+
+nameSubmit.addEventListener('click', submitName);
+nameInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter') submitName();
+});
+
+function submitName() {
+  const name = nameInput.value.trim() || 'UNKNOWN';
+  hideNameEntry();
+  const now = new Date();
+  const entry = {
+    name,
+    wave:  lastScore.wave,
+    kills: lastScore.kills,
+    date:  `${now.getMonth()+1}/${now.getDate()} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`,
+  };
+  highScores.push(entry);
   highScores.sort((a, b) => (b.kills + b.wave * 10) - (a.kills + a.wave * 10));
   if (highScores.length > 10) highScores.length = 10;
+  lastScore = entry;
   gameState = 'highscores';
+}
+
+function enterGameOver() {
+  lastScore = { wave, kills: score };
+  showNameEntry();
+  gameState = 'nameEntry';
 }
 
 function enterBossDying() {
@@ -658,6 +707,11 @@ function update(dt) {
 
   if (gameState === 'title' || gameState === 'highscores') {
     if (keys['Space']) { keys['Space'] = false; initGame(); }
+    return;
+  }
+
+  if (gameState === 'nameEntry') {
+    // Waiting for HTML input — do nothing
     return;
   }
 
@@ -690,7 +744,13 @@ function update(dt) {
 
   if (gameState === 'waveEnd') {
     stateTimer -= dt;
+    updateShip(dt);
+    updateLasers(dt);
+    updateZombies(dt);
+    updateBoss(dt);
+    updateBossLasers(dt);
     updateParticles(dt);
+    tryFire();
     if (stateTimer <= 0) { wave++; beginWaveIntro(); }
     return;
   }
@@ -785,6 +845,8 @@ function updateZombies(dt) {
       const t = Math.max(0, 1 - distToShip / outerRange);
       spd = Z_SPEED_NORM + (Z_SPEED_AGGRO - Z_SPEED_NORM) * 0.4 * t;
     }
+
+    spd *= zombieSpeedMult;
 
     const dx = ship.x - z.x, dy = ship.y - z.y;
     const d  = Math.hypot(dx, dy);
@@ -887,7 +949,8 @@ function resolveCollisions() {
         if (boss.hp <= 0) {
           boss.alive = false;
           bossesDefeated++;
-          shipSpeedMult += 0.1;
+          shipSpeedMult   += 0.1;
+          zombieSpeedMult += 0.2;
           enterBossDying();
         }
       }
@@ -949,6 +1012,13 @@ function draw() {
 
   if (gameState === 'highscores') {
     drawHighScores();
+    return;
+  }
+
+  if (gameState === 'nameEntry') {
+    ctx.fillStyle = 'rgba(0,0,0,0.82)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    drawStars();
     return;
   }
 
@@ -1088,7 +1158,7 @@ function drawZombie(z) {
   if (laughing) {
     const eyeX = r * 0.3, eyeY = -r * 0.18;
     const eyeW = r * 0.32;
-    const mY = r * 0.33, mW = r * 0.62, mH = r * 0.22;
+    const mY = r * 0.25, mW = r * 0.62, mH = r * 0.32;
 
     ctx.shadowColor = 'rgba(0,255,80,0.8)';
     ctx.shadowBlur  = 18;
@@ -1097,28 +1167,43 @@ function drawZombie(z) {
     ctx.strokeStyle = '#00aa22'; ctx.lineWidth = 3; ctx.stroke();
     ctx.shadowBlur  = 0;
 
+    const elapsed    = ZOMBIE_LAUGH_DUR - deathTimer;
+    const eyeSquint  = Math.abs(Math.sin(elapsed * 6));   // 0 = open, 1 = shut
+    const mouthOpen  = Math.abs(Math.sin(elapsed * 6));
+
+    // Squinty animated eyes
     [[-eyeX, eyeY], [eyeX, eyeY]].forEach(([ex, ey]) => {
-      ctx.strokeStyle = '#003300'; ctx.lineWidth = 3;
+      const eyeHt = eyeW * 0.45 * (0.12 + 0.28 * (1 - eyeSquint));
+      ctx.fillStyle = '#003300';
       ctx.beginPath();
-      ctx.arc(ex, ey, eyeW * 0.45, Math.PI, 0);
+      ctx.ellipse(ex, ey, eyeW * 0.45, eyeHt, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#00aa22'; ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(ex, ey - eyeHt * 0.3, eyeW * 0.28, Math.PI, 0);
       ctx.stroke();
     });
 
-    const elapsed    = ZOMBIE_LAUGH_DUR - deathTimer;
-    const mouthOpen  = Math.max(0, Math.sin(elapsed * 6));
-    const mouthAngle = Math.PI * (0.3 + 0.7 * mouthOpen);
+    // Mouth: vertical open/close rectangle
+    const mH_cur = mH * 0.25 + mH * 1.4 * mouthOpen;
     ctx.fillStyle = '#003300';
-    ctx.beginPath();
-    ctx.moveTo(0, mY);
-    ctx.arc(0, mY, mW * 0.55, 0, mouthAngle);
-    ctx.closePath(); ctx.fill();
+    ctx.fillRect(-mW * 0.48, mY, mW * 0.96, mH_cur);
+    // Teeth — 5 vertical white bars inside mouth
     ctx.fillStyle = '#ffffff';
-    const toothW = (mW * 0.9) / 5;
+    const toothW = (mW * 0.88) / 5;
     for (let i = 0; i < 5; i++) {
-      ctx.fillRect(-mW * 0.45 + i * toothW + 1, mY, toothW - 2, mH * 1.0);
+      ctx.fillRect(-mW * 0.44 + i * toothW + 1, mY + 2, toothW - 2,
+                   mH_cur * 0.65 * mouthOpen + 2);
     }
     ctx.restore(); return;
   }
+
+  // Idle bob + wobble
+  const t   = performance.now() * 0.001;
+  const bob = Math.sin(t * 2.5 + seed * 13.7) * 1.8;
+  const wob = Math.sin(t * 1.8 + seed * 9.3) * 0.055;
+  ctx.translate(0, bob);
+  ctx.rotate(wob);
 
   ctx.shadowColor = angry ? 'rgba(180,0,0,0.6)' : `hsl(${hue},50%,22%)`;
   ctx.shadowBlur  = 10;
@@ -1210,6 +1295,12 @@ function drawBoss() {
   const { x, y, radius: r } = boss;
   ctx.save();
   ctx.translate(x, y);
+
+  const t   = performance.now() * 0.001;
+  const bob = Math.sin(t * 1.6 + boss.seed * 9.1) * 3.0;
+  const wob = Math.sin(t * 1.2 + boss.seed * 7.4) * 0.07;
+  ctx.translate(0, bob);
+  ctx.rotate(wob);
 
   ctx.shadowColor = '#ff0000';
   ctx.shadowBlur  = 20;
@@ -1440,9 +1531,9 @@ function drawHighScores() {
   ctx.shadowBlur  = 0;
 
   if (lastScore) {
-    ctx.font      = '22px monospace';
+    ctx.font      = '20px monospace';
     ctx.fillStyle = '#ffffff';
-    ctx.fillText(`Wave ${lastScore.wave}  ·  Kills ${lastScore.kills}`, cx, cy - 140);
+    ctx.fillText(`${lastScore.name||'???'}  ·  Wave ${lastScore.wave}  ·  Kills ${lastScore.kills}`, cx, cy - 140);
   }
 
   ctx.font        = 'bold 28px monospace';
@@ -1453,10 +1544,13 @@ function drawHighScores() {
 
   const top5 = highScores.slice(0, 5);
   top5.forEach((s, i) => {
-    const isCurrent = lastScore && s.wave === lastScore.wave && s.kills === lastScore.kills;
-    ctx.font      = isCurrent ? 'bold 22px monospace' : '20px monospace';
+    const isCurrent = (lastScore && s === lastScore);
+    ctx.font      = isCurrent ? 'bold 20px monospace' : '18px monospace';
     ctx.fillStyle = isCurrent ? '#ffff00' : '#aaaaaa';
-    ctx.fillText(`${i + 1}.  Wave ${s.wave}  Kills ${s.kills}`, cx, cy - 48 + i * 34);
+    ctx.fillText(
+      `${i+1}. ${(s.name||'???').padEnd(10)}  W${s.wave}  K${s.kills}  ${s.date||''}`,
+      cx, cy - 48 + i * 36
+    );
   });
 
   ctx.font      = 'bold 20px monospace';
