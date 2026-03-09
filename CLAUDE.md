@@ -3,7 +3,7 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project
-Single-file HTML5 canvas game. **All code lives in `zombie-space-shooter.html`** — HTML, CSS, JavaScript inline. No build process. No external dependencies. Author: Louis.
+Single-file HTML5 canvas game. **All code lives in `zombies/index.html`** — HTML, CSS, JavaScript inline. No build process. No external dependencies. Author: Louis.
 
 **Live:** https://buysacoke.github.io/zombie-space-shooter/zombie-space-shooter.html
 
