@@ -59,6 +59,11 @@ window.addEventListener('keydown', e => {
   if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) {
     e.preventDefault();
   }
+  if (e.code === 'Escape' &&
+      !['title','highscores','waveIntro','nameEntry'].includes(gameState)) {
+    paused = !paused;
+    return;
+  }
   keys[e.code] = true;
 });
 window.addEventListener('keyup', e => { keys[e.code] = false; });
@@ -82,6 +87,18 @@ function handleTouches(e) {
   }
   const btn = fireBtnPos();
   const jb  = joystickBase();
+
+  if (e.type === 'touchstart' && e.touches.length === 1 &&
+      !['title','highscores','waveIntro','nameEntry'].includes(gameState)) {
+    const t0 = e.touches[0];
+    const distBtn = Math.hypot(t0.clientX - btn.x, t0.clientY - btn.y);
+    const distJoy = Math.hypot(t0.clientX - jb.x,  t0.clientY - jb.y);
+    if (distBtn >= FIRE_BTN_R && distJoy >= JOY_OUTER_R) {
+      const now2 = performance.now();
+      if (now2 - lastTapTime < 300) { paused = !paused; }
+      lastTapTime = now2;
+    }
+  }
 
   touchFiring = false;
   let joystickTouchStillPresent = false;
@@ -134,6 +151,8 @@ let audioCtx     = null;
 let musicNodes   = null;
 let currentMusic = 'none';
 let activeGroans = 0;
+let paused      = false;
+let lastTapTime = 0;
 
 function ensureAudio() {
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -242,6 +261,48 @@ function playLaugh() {
   });
 }
 
+function playZombieScream() {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  const osc    = audioCtx.createOscillator();
+  const shaper = audioCtx.createWaveShaper();
+  const g      = audioCtx.createGain();
+  const n = 256, curve = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = (i * 2) / n - 1;
+    curve[i] = (Math.PI + 80) * x / (Math.PI + 80 * Math.abs(x));
+  }
+  shaper.curve = curve;
+  osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(220, t);
+  osc.frequency.linearRampToValueAtTime(180, t + 0.15);
+  osc.frequency.linearRampToValueAtTime(80,  t + 1.8);
+  osc.frequency.linearRampToValueAtTime(35,  t + 3.0);
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(0.35, t + 0.08);
+  g.gain.setValueAtTime(0.32, t + 2.0);
+  g.gain.linearRampToValueAtTime(0, t + 3.2);
+  osc.connect(shaper); shaper.connect(g); g.connect(audioCtx.destination);
+  osc.start(t); osc.stop(t + 3.3);
+}
+
+function playGameOverMelody() {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  [[440, 0.00, 0.38], [349, 0.42, 0.38], [311, 0.84, 0.38], [262, 1.26, 0.65]].forEach(([freq, off, dur]) => {
+    const osc = audioCtx.createOscillator();
+    const g   = audioCtx.createGain();
+    osc.type = 'square';
+    osc.frequency.value = freq;
+    g.gain.setValueAtTime(0, t + off);
+    g.gain.linearRampToValueAtTime(0.18, t + off + 0.04);
+    g.gain.setValueAtTime(0.15, t + off + dur * 0.65);
+    g.gain.linearRampToValueAtTime(0, t + off + dur);
+    osc.connect(g); g.connect(audioCtx.destination);
+    osc.start(t + off); osc.stop(t + off + dur + 0.05);
+  });
+}
+
 function playBossPain() {
   if (!audioCtx) return;
   const t = audioCtx.currentTime;
@@ -269,6 +330,22 @@ function playBossDeathBoom() {
     g.gain.exponentialRampToValueAtTime(0.001, t + i * 0.06 + 1.0);
     osc.connect(g); g.connect(audioCtx.destination);
     osc.start(t + i * 0.06); osc.stop(t + i * 0.06 + 1.1);
+  });
+}
+
+function playBossLaserThunder() {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  [80, 120, 200].forEach((freq, i) => {
+    const osc = audioCtx.createOscillator();
+    const g   = audioCtx.createGain();
+    osc.type  = 'sawtooth';
+    osc.frequency.setValueAtTime(freq * 3, t + i * 0.01);
+    osc.frequency.exponentialRampToValueAtTime(freq * 0.4, t + 0.35);
+    g.gain.setValueAtTime(0.38 - i * 0.06, t + i * 0.01);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.40);
+    osc.connect(g); g.connect(audioCtx.destination);
+    osc.start(t + i * 0.01); osc.stop(t + 0.45);
   });
 }
 
@@ -479,7 +556,7 @@ const WAVE_INTRO_DUR = 2.2;
 const FIRE_BTN_R     = 72;
 
 const LIVES            = 3;
-const BOSS_LASER_SPEED = 260;
+const BOSS_LASER_SPEED = 338;
 const BOSS_LASER_COLOR = '#ff6600';
 const JOY_OUTER_R      = 65;
 const JOY_INNER_R      = 28;
@@ -541,6 +618,7 @@ function initGame() {
   ship.immuneTimer = 0;
   screenFlash      = 0;
   lastScore        = null;
+  paused           = false;
   hideNameEntry();
   resetShipPos();
   beginWaveIntro();
@@ -579,8 +657,11 @@ function spawnBoss() {
     seed:          Math.random(),
     hue:           0,
     groanTimer:    2 + Math.random() * 3,
-    laserTimer:    3 - (bn - 1) * 0.3,
-    laserInterval: Math.max(0.8, 3 - (bn - 1) * 0.3),
+    laserTimer:    Math.max(0.5, 2.0 - (bn - 1) * 0.2),
+    laserInterval: Math.max(0.5, 2.0 - (bn - 1) * 0.2),
+    charging:    false,
+    chargeTimer: 0,
+    flashTimer:  0,
   };
 }
 
@@ -625,11 +706,8 @@ function killShip(zombieIdx) {
   stopMusic();
 
   if (zombieIdx >= 0) {
-    // Zombie kill → laugh sequence — all other zombies vanish
-    for (let i = 0; i < zombies.length; i++) {
-      if (i !== zombieIdx) zombies[i].alive = false;
-    }
-    playLaugh();
+    // Zombie kill → laugh sequence
+    playZombieScream();
     gameState  = 'zombieLaugh';
     deathTimer = ZOMBIE_LAUGH_DUR;
   } else {
@@ -676,6 +754,8 @@ function submitName() {
 }
 
 function enterGameOver() {
+  ensureAudio();
+  playGameOverMelody();
   lastScore = { wave, kills: score };
   showNameEntry();
   gameState = 'nameEntry';
@@ -703,6 +783,7 @@ function respawnShip() {
 
 // ── Update ────────────────────────────────────────────────────────────────────
 function update(dt) {
+  if (paused) return;
   if (screenFlash > 0) screenFlash = Math.max(0, screenFlash - dt * 1.8);
 
   if (gameState === 'title' || gameState === 'highscores') {
@@ -737,7 +818,10 @@ function update(dt) {
 
   if (gameState === 'bossDying') {
     deathTimer -= dt;
+    updateShip(dt);
+    updateLasers(dt);
     updateParticles(dt);
+    tryFire();
     if (deathTimer <= 0) { wave++; beginWaveIntro(); }
     return;
   }
@@ -871,11 +955,15 @@ function updateZombies(dt) {
 
 function updateBoss(dt) {
   if (!boss || !boss.alive) return;
+
+  const distToShip = Math.hypot(ship.x - boss.x, ship.y - boss.y);
+  const bossAngry  = distToShip < Z_AGGRO_DIST * 2;
   const dx = ship.x - boss.x, dy = ship.y - boss.y;
   const d  = Math.hypot(dx, dy);
   if (d > 0.5) {
-    boss.x += (dx / d) * boss.speed * dt;
-    boss.y += (dy / d) * boss.speed * dt;
+    const moveSpd = boss.speed * (bossAngry ? 2.0 : 1.0);
+    boss.x += (dx / d) * moveSpd * dt;
+    boss.y += (dy / d) * moveSpd * dt;
   }
 
   boss.groanTimer -= dt;
@@ -884,17 +972,40 @@ function updateBoss(dt) {
     boss.groanTimer = 3 + Math.random() * 4;
   }
 
-  boss.laserTimer -= dt;
-  if (boss.laserTimer <= 0) {
-    boss.laserTimer = boss.laserInterval;
-    const ldx = ship.x - boss.x, ldy = ship.y - boss.y;
-    const ld  = Math.hypot(ldx, ldy) || 1;
-    bossLasers.push({
-      x: boss.x, y: boss.y,
-      vx: (ldx / ld) * BOSS_LASER_SPEED,
-      vy: (ldy / ld) * BOSS_LASER_SPEED,
-      dead: false,
-    });
+  if (boss.flashTimer > 0) boss.flashTimer -= dt;
+
+  if (!boss.charging) {
+    boss.laserTimer -= dt;
+    if (boss.laserTimer <= 0) {
+      boss.charging    = true;
+      boss.chargeTimer = 0.25;
+    }
+  } else {
+    boss.chargeTimer -= dt;
+    for (let ci = 0; ci < 3; ci++) {
+      const ang = Math.random() * Math.PI * 2;
+      const spd = 50 + Math.random() * 70;
+      particles.push({ type: 'debris', x: boss.x, y: boss.y,
+        vx: Math.cos(ang) * spd, vy: Math.sin(ang) * spd,
+        r: 2 + Math.random() * 2.5, life: 0.22, maxLife: 0.22,
+        color: Math.random() > 0.5 ? '#ffaa00' : '#ffff44' });
+    }
+    if (boss.chargeTimer <= 0) {
+      boss.charging   = false;
+      boss.flashTimer = 0.12;
+      boss.laserTimer = boss.laserInterval * (0.6 + Math.random() * 0.8);
+      const ldx = ship.x - boss.x, ldy = ship.y - boss.y;
+      const ld  = Math.hypot(ldx, ldy) || 1;
+      bossLasers.push({
+        x: boss.x + (ldx / ld) * boss.radius,
+        y: boss.y + (ldy / ld) * boss.radius,
+        vx: (ldx / ld) * BOSS_LASER_SPEED,
+        vy: (ldy / ld) * BOSS_LASER_SPEED,
+        dead: false,
+      });
+      ensureAudio();
+      playBossLaserThunder();
+    }
   }
 }
 
@@ -1045,6 +1156,10 @@ function draw() {
   drawBossHealthBar();
   drawFireButton();
   drawJoystick();
+
+  if (paused && !['title','highscores','waveIntro','nameEntry'].includes(gameState)) {
+    drawPauseOverlay();
+  }
 }
 
 function drawStars() {
@@ -1138,7 +1253,7 @@ function drawBossLasers() {
     ctx.save();
     ctx.translate(l.x, l.y);
     ctx.rotate(ang + Math.PI / 2);
-    ctx.fillRect(-2, -20, 4, 40);
+    ctx.fillRect(-4, -30, 8, 60);
     ctx.restore();
   }
   ctx.restore();
@@ -1157,9 +1272,10 @@ function drawZombie(z) {
 
   if (laughing) {
     const eyeX = r * 0.3, eyeY = -r * 0.18;
-    const eyeW = r * 0.32;
-    const mY = r * 0.25, mW = r * 0.62, mH = r * 0.32;
+    const eyeW = r * 0.32, eyeH = r * 0.26;
+    const mY = r * 0.22, mW = r * 0.62, mH = r * 0.30;
 
+    // Glowing green circle
     ctx.shadowColor = 'rgba(0,255,80,0.8)';
     ctx.shadowBlur  = 18;
     ctx.beginPath(); ctx.arc(0, 0, r * 1.1, 0, Math.PI * 2);
@@ -1167,33 +1283,24 @@ function drawZombie(z) {
     ctx.strokeStyle = '#00aa22'; ctx.lineWidth = 3; ctx.stroke();
     ctx.shadowBlur  = 0;
 
-    const elapsed    = ZOMBIE_LAUGH_DUR - deathTimer;
-    const eyeSquint  = Math.abs(Math.sin(elapsed * 6));   // 0 = open, 1 = shut
-    const mouthOpen  = Math.abs(Math.sin(elapsed * 6));
-
-    // Squinty animated eyes
+    // Static normal-style eyes (white rect + red pupil)
     [[-eyeX, eyeY], [eyeX, eyeY]].forEach(([ex, ey]) => {
-      const eyeHt = eyeW * 0.45 * (0.12 + 0.28 * (1 - eyeSquint));
-      ctx.fillStyle = '#003300';
-      ctx.beginPath();
-      ctx.ellipse(ex, ey, eyeW * 0.45, eyeHt, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = '#00aa22'; ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.arc(ex, ey - eyeHt * 0.3, eyeW * 0.28, Math.PI, 0);
-      ctx.stroke();
+      ctx.fillStyle = '#ddd';
+      ctx.fillRect(ex - eyeW / 2, ey - eyeH / 2, eyeW, eyeH);
+      ctx.fillStyle = '#bb0000';
+      ctx.fillRect(ex - eyeW * 0.18, ey - eyeH * 0.38, eyeW * 0.36, eyeH * 0.76);
     });
 
-    // Mouth: vertical open/close rectangle
-    const mH_cur = mH * 0.25 + mH * 1.4 * mouthOpen;
+    // Static upward curved smile with full white teeth
     ctx.fillStyle = '#003300';
-    ctx.fillRect(-mW * 0.48, mY, mW * 0.96, mH_cur);
-    // Teeth — 5 vertical white bars inside mouth
+    ctx.beginPath();
+    ctx.arc(0, mY, mW * 0.5, 0, Math.PI);  // lower semicircle = smile shape
+    ctx.closePath();
+    ctx.fill();
     ctx.fillStyle = '#ffffff';
     const toothW = (mW * 0.88) / 5;
     for (let i = 0; i < 5; i++) {
-      ctx.fillRect(-mW * 0.44 + i * toothW + 1, mY + 2, toothW - 2,
-                   mH_cur * 0.65 * mouthOpen + 2);
+      ctx.fillRect(-mW * 0.44 + i * toothW + 1, mY + 1, toothW - 2, mH * 0.55);
     }
     ctx.restore(); return;
   }
@@ -1287,7 +1394,13 @@ function drawZombie(z) {
 }
 
 function drawZombies() {
-  for (const z of zombies) drawZombie(z);
+  for (let i = 0; i < zombies.length; i++) {
+    if (i === killerZombieIdx) continue;
+    drawZombie(zombies[i]);
+  }
+  if (killerZombieIdx >= 0 && killerZombieIdx < zombies.length) {
+    drawZombie(zombies[killerZombieIdx]);
+  }
 }
 
 function drawBoss() {
@@ -1302,15 +1415,22 @@ function drawBoss() {
   ctx.translate(0, bob);
   ctx.rotate(wob);
 
-  ctx.shadowColor = '#ff0000';
-  ctx.shadowBlur  = 20;
+  const distToShip = Math.hypot(ship.x - boss.x, ship.y - boss.y);
+  const bossAngry  = distToShip < Z_AGGRO_DIST * 2;
+  const chargeP    = boss.charging ? (1 - boss.chargeTimer / 0.25) : 0;
+  const isFlash    = boss.flashTimer > 0;
+
+  ctx.shadowColor = bossAngry ? '#ff8800' : '#ff0000';
+  ctx.shadowBlur  = isFlash ? 60 : (20 + chargeP * 25 + (bossAngry ? 15 : 0));
 
   ctx.beginPath();
   ctx.arc(0, 0, r, 0, Math.PI * 2);
-  ctx.fillStyle   = '#5a0a0a';
+  ctx.fillStyle   = isFlash ? '#ffffff' : (bossAngry ? '#8a1010' : '#5a0a0a');
   ctx.fill();
-  ctx.strokeStyle = '#ff2222';
-  ctx.lineWidth   = 4;
+  ctx.strokeStyle = isFlash ? '#ffffff' :
+    boss.charging ? `hsl(30,100%,${30 + Math.round(chargeP * 50)}%)` :
+    bossAngry     ? '#ffaa00' : '#ff2222';
+  ctx.lineWidth   = isFlash ? 6 : 4;
   ctx.stroke();
   ctx.shadowBlur  = 0;
 
@@ -1331,6 +1451,19 @@ function drawBoss() {
     ctx.fillStyle = '#ff0000';
     ctx.fillRect(ex - eyeW * 0.18, ey - eyeH * 0.38, eyeW * 0.36, eyeH * 0.76);
   });
+
+  if (bossAngry) {
+    ctx.strokeStyle = '#ffaa00';
+    ctx.lineWidth   = 4;
+    ctx.beginPath();
+    ctx.moveTo(-eyeX - eyeW * 0.55, eyeY - eyeH * 1.3);
+    ctx.lineTo(-eyeX + eyeW * 0.40, eyeY - eyeH * 0.4);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(eyeX - eyeW * 0.40, eyeY - eyeH * 0.4);
+    ctx.lineTo(eyeX + eyeW * 0.55, eyeY - eyeH * 1.3);
+    ctx.stroke();
+  }
 
   const mY = r * 0.33, mW = r * 0.65, mH = r * 0.22;
   ctx.fillStyle = '#0a0a0a';
@@ -1483,6 +1616,9 @@ function drawTitle() {
   ctx.fillText('ZOMBIE', cx, cy - 60);
   ctx.fillText('SPACE SHOOTER', cx, cy);
   ctx.shadowBlur  = 0;
+  ctx.font        = '16px monospace';
+  ctx.fillStyle   = '#667788';
+  ctx.fillText('by Louis', cx, cy + 28);
   ctx.font        = '20px monospace';
   ctx.fillStyle   = '#888';
   ctx.fillText(isTouchDevice
@@ -1491,6 +1627,24 @@ function drawTitle() {
   ctx.fillStyle   = '#ccc';
   ctx.font        = 'bold 20px monospace';
   ctx.fillText(isTouchDevice ? 'Tap to start' : 'Press SPACE to start', cx, cy + 90);
+  ctx.restore();
+}
+
+function drawPauseOverlay() {
+  const cx = canvas.width / 2, cy = canvas.height / 2;
+  ctx.fillStyle = 'rgba(0,0,0,0.60)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.save();
+  ctx.textAlign   = 'center';
+  ctx.font        = 'bold 72px monospace';
+  ctx.fillStyle   = '#ffffff';
+  ctx.shadowColor = '#ffffff';
+  ctx.shadowBlur  = 20;
+  ctx.fillText('PAUSED', cx, cy);
+  ctx.shadowBlur  = 0;
+  ctx.font        = '22px monospace';
+  ctx.fillStyle   = '#888888';
+  ctx.fillText(isTouchDevice ? 'Double-tap to resume' : 'Press Esc to resume', cx, cy + 52);
   ctx.restore();
 }
 
